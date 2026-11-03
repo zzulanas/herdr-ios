@@ -1,44 +1,7 @@
 import SwiftUI
 import HerdrKit
 
-/// One entry the box-side script emitted (TranscriptScript).
-enum ChatEntry {
-    case user(String, Date?)
-    case note(String)
-    case command(String)
-    case compact
-    case text(String)
-    case tool(id: String, name: String, summary: String, detail: String, at: Date?)
-    case result(id: String, isError: Bool, output: String)
-    case duration(ms: Int)
-}
-
-struct ToolCall: Identifiable, Equatable {
-    var id: String
-    var name: String
-    var summary: String
-    var detail: String
-    var output: String?
-    var isError = false
-}
-
-enum ChatStep: Identifiable, Equatable {
-    case text(Int, String)
-    case tools(Int, [ToolCall])
-    var id: Int { switch self { case .text(let i, _), .tools(let i, _): i } }
-    var toolCount: Int { if case .tools(_, let c) = self { c.count } else { 0 } }
-}
-
-/// One prompt and everything the agent did in answer.
-struct ChatTurn: Identifiable, Equatable {
-    enum Prompt: Equatable { case user(String), note(String), command(String) }
-    var id: Int
-    var prompt: Prompt?
-    var compacted = false
-    var steps: [ChatStep] = []
-    var durationMs: Int?
-    var startedAt: Date?
-}
+// ChatEntry, ChatTurn and the fold live in HerdrKit (Chat.swift), unit-tested there.
 
 /// Reads an agent's Claude Code transcript from the box and folds it into
 /// turns. Polls quickly while the agent works, slowly otherwise; never
@@ -64,13 +27,16 @@ final class ChatModel {
     /// A nudge arrived while no pause was waiting (mid-load): skip the next pause.
     private var nudged = false
     private weak var store: AppStore?
+    #if DEBUG
+    @ObservationIgnored fileprivate var demoObserver: NSObjectProtocol?
+    #endif
 
     init(address: String) { self.address = address }
 
     func start(store: AppStore) {
         self.store = store
         #if DEBUG
-        if AppStore.isDemo { loadDemo(); return }
+        if AppStore.isDemo { if demoObserver == nil { loadDemo() }; return }
         #endif
         guard loop == nil else { return }
         loop = Task { [weak self] in
@@ -181,51 +147,8 @@ final class ChatModel {
         }
     }
 
-    /// Folds entries into turns: a prompt starts one; texts and tool calls
-    /// follow; consecutive tool calls share a group; results attach by id.
     private func rebuild() {
-        var out: [ChatTurn] = []
-        var where_: [String: (turn: Int, step: Int, call: Int)] = [:]
-        var n = 0
-        func next() -> Int { n += 1; return n }
-        func current() -> Int {
-            if out.isEmpty { out.append(ChatTurn(id: next())) }
-            return out.count - 1
-        }
-        for e in entries {
-            switch e {
-            case .user(let s, let at): out.append(ChatTurn(id: next(), prompt: .user(s), startedAt: at))
-            case .note(let s): out.append(ChatTurn(id: next(), prompt: .note(s)))
-            case .command(let s): out.append(ChatTurn(id: next(), prompt: .command(s)))
-            case .compact:
-                // A boundary and its "continued from" summary arrive together: one marker.
-                if let last = out.last, last.compacted, last.prompt == nil, last.steps.isEmpty { continue }
-                out.append(ChatTurn(id: next(), compacted: true))
-            case .text(let s):
-                let i = current(); out[i].steps.append(.text(next(), s))
-            case .tool(let id, let name, let sum, let detail, let at):
-                let i = current()
-                if out[i].startedAt == nil { out[i].startedAt = at }
-                let call = ToolCall(id: id, name: name, summary: sum, detail: detail)
-                if case .tools(let sid, var calls)? = out[i].steps.last {
-                    calls.append(call)
-                    out[i].steps[out[i].steps.count - 1] = .tools(sid, calls)
-                    where_[id] = (i, out[i].steps.count - 1, calls.count - 1)
-                } else {
-                    out[i].steps.append(.tools(next(), [call]))
-                    where_[id] = (i, out[i].steps.count - 1, 0)
-                }
-            case .result(let id, let err, let output):
-                guard let w = where_[id], case .tools(let sid, var calls) = out[w.turn].steps[w.step] else { continue }
-                calls[w.call].output = output
-                calls[w.call].isError = err
-                out[w.turn].steps[w.step] = .tools(sid, calls)
-            case .duration(let ms):
-                if !out.isEmpty { out[out.count - 1].durationMs = ms }
-            }
-        }
-        // A trailing "continued from earlier" marker with nothing after it reads oddly; keep it, it's honest.
-        turns = out
+        turns = ChatFold.turns(entries)
         revision += 1
     }
 }
@@ -269,7 +192,15 @@ enum ToolStyle {
 extension ChatModel {
     fileprivate func loadDemo() {
         let now = Date()
-        entries = [
+        // Older turns first, so the chat is several screens tall like a real one.
+        let older: [ChatEntry] = (1...12).flatMap { i -> [ChatEntry] in [
+            .user("Earlier request \(i): tidy up module \(i)", now.addingTimeInterval(Double(-4000 + i * 200))),
+            .tool(id: "o\(i)", name: "Read", summary: "src/module\(i).ts", detail: "", at: nil),
+            .result(id: "o\(i)", isError: false, output: "120 lines"),
+            .text("Module \(i) is tidy now.\n\n" + (1...(i % 3 == 0 ? 40 : 6)).map { "- Change \($0): removed dead code and renamed a helper so call sites read better" }.joined(separator: "\n")),
+            .duration(ms: 20_000 + i * 1000),
+        ] }
+        entries = older + [
             .user("Add a global time slider to the analytics dashboard so every chart shares one range", now.addingTimeInterval(-900)),
             .text("I'll start by looking at how the dashboard wires its charts together."),
             .tool(id: "a", name: "Read", summary: "~/projects/webapp/src/dashboard/Dashboard.tsx", detail: "", at: nil),
@@ -304,6 +235,19 @@ extension ChatModel {
         ]
         rebuild()
         phase = .ready
+        demoObserver = NotificationCenter.default.addObserver(forName: Self.demoNote, object: nil, queue: .main) { [weak self] n in
+            guard let add = n.userInfo?["entries"] as? [ChatEntry], n.userInfo?["address"] as? String == self?.address else { return }
+            MainActor.assumeIsolated {
+                self?.entries += add
+                self?.rebuild()
+            }
+        }
+    }
+
+    static let demoNote = Notification.Name("herdr.demoChat")
+    /// Demo mode: append entries to an open Chat, as if the transcript grew.
+    static func demoPost(_ address: String, _ entries: [ChatEntry]) {
+        NotificationCenter.default.post(name: demoNote, object: nil, userInfo: ["address": address, "entries": entries])
     }
 }
 #endif
