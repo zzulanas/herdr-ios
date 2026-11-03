@@ -417,6 +417,9 @@ final class AppStore {
     }
 
     func send(_ address: String, text: String) async throws {
+        #if DEBUG
+        if Self.isDemo { try await demoSend(address, text: text); return }
+        #endif
         _ = try await connectedClient().call("terminal.send", ["terminal": .string(address), "text": .string(text)], timeout: 15)
     }
     func keys(_ address: String, _ keys: [String]) async throws {

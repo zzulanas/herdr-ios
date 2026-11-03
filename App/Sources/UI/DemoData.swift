@@ -78,6 +78,36 @@ extension AppStore {
     }
 }
 
+extension AppStore {
+    /// Demo send: Chat shows the prompt, the agent works for a few seconds, then answers.
+    /// Lets the composer → turns → reply path run in the simulator without a box.
+    func demoSend(_ address: String, text: String) async throws {
+        try await Task.sleep(for: .milliseconds(300))
+        if text.contains("fail-send") { throw DemoError() }
+        let now = Date()
+        ChatModel.demoPost(address, [.user(text, now)])
+        setDemoStatus(address, "working")
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.5))
+            ChatModel.demoPost(address, [.text("Looking into it."),
+                                         .tool(id: "demo\(now.timeIntervalSince1970)", name: "Bash", summary: "Run the tests", detail: "", at: now)])
+            try? await Task.sleep(for: .seconds(2))
+            ChatModel.demoPost(address, [.text("Done. **All 42 tests pass.**\n\nSecond paragraph that should not be spoken."), .duration(ms: 3800)])
+            self.setDemoStatus(address, "done")
+        }
+    }
+
+    struct DemoError: LocalizedError { var errorDescription: String? { "Demo send failed" } }
+
+    func setDemoStatus(_ address: String, _ word: String) {
+        guard let r = terminals[address], var o = r.raw.object else { return }
+        var st = o["status"]?.object ?? [:]
+        st["state"] = .string(word)
+        o["status"] = .object(st)
+        terminals[address] = TerminalRecord(raw: .object(o))
+    }
+}
+
 enum DemoData {
     /// A plausible first paint for the terminal screen (VT bytes).
     static func screen(for address: String, record: TerminalRecord?) -> [UInt8] {

@@ -9,6 +9,13 @@ struct ChatView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.scenePhase) private var scenePhase
     @State private var model: ChatModel
+    @State private var shownTurns = ChatView.turnPage
+    @State private var position = ScrollPosition(edge: .bottom)
+    @State private var pinned = true
+
+    /// What changes the bottom of the chat.
+    private struct BottomKey: Equatable { var revision: Int; var working: Bool; var blocked: Bool }
+    static let turnPage = 30
 
     init(address: String) {
         self.address = address
@@ -19,7 +26,10 @@ struct ChatView: View {
         let att = store.attention(of: address)
         let rec = store.terminals[address]
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 18) {
+            // Not Lazy: a LazyVStack bottom-anchored with tall rows loses its rendered
+            // rows when a send changes the composer and the last turn at once (the
+            // chat went blank until scrolled). Eager rows can't; `shown` caps the cost.
+            VStack(alignment: .leading, spacing: 18) {
                 content(working: att == .working)
             }
             .padding(.horizontal, 16)
@@ -28,6 +38,16 @@ struct ChatView: View {
         }
         .defaultScrollAnchor(.bottom)
         .defaultScrollAnchor(.bottom, for: .sizeChanges)
+        // Follow the conversation while you're at the bottom; leave you be when you've scrolled up.
+        .scrollPosition($position)
+        .onScrollGeometryChange(for: Bool.self) { g in
+            g.visibleRect.maxY >= g.contentSize.height - 80
+        } action: { _, atBottom in
+            pinned = atBottom
+        }
+        .onChange(of: BottomKey(revision: model.revision, working: att == .working, blocked: att == .blocked)) { _, _ in
+            if pinned { position.scrollTo(edge: .bottom) }
+        }
         .scrollEdgeEffectStyle(.hard, for: .top)
         .scrollDismissesKeyboard(.interactively)
         .background(HC.canvas)
@@ -58,11 +78,20 @@ struct ChatView: View {
         case .failed(let why) where model.turns.isEmpty:
             emptyState("exclamationmark.triangle", "Couldn't read the conversation", hint: why)
         default:
-            if model.hasEarlier {
+            if model.hasEarlier, shownTurns >= model.turns.count {
                 Label("Earlier messages are in the terminal's history", systemImage: "clock.arrow.circlepath")
                     .font(HF.ui(12.5)).foregroundStyle(HC.dim).frame(maxWidth: .infinity)
             }
-            ForEach(model.turns) { turn in
+            let shown = model.turns.suffix(shownTurns)
+            if shown.count < model.turns.count {
+                Button { shownTurns += Self.turnPage } label: {
+                    Label("Show \(min(Self.turnPage, model.turns.count - shown.count)) earlier", systemImage: "chevron.up")
+                        .font(HF.ui(13, .medium)).foregroundStyle(HC.dim)
+                        .frame(maxWidth: .infinity).padding(.vertical, 6)
+                }
+                .buttonStyle(.plain)
+            }
+            ForEach(shown) { turn in
                 TurnView(turn: turn, isLast: turn.id == model.turns.last?.id, working: working)
             }
             if working { WorkingRow(since: model.turns.last?.startedAt) }
@@ -544,6 +573,7 @@ private struct ChatComposer: View {
                     .font(HF.ui(15.5))
                     .lineLimit(1...6)
                     .focused($focused)
+                    .accessibilityIdentifier("composer")
                     .padding(.horizontal, 16).padding(.vertical, 12)
                     .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 22))
                 if working && draft.isEmpty {
@@ -573,6 +603,12 @@ private struct ChatComposer: View {
             }
         }
         .dynamicTypeSize(...DynamicTypeSize.xxLarge)
+        .onAppear {
+            #if DEBUG
+            // UI tests: a ready draft, so Send can be tapped with no keyboard up.
+            if let d = ProcessInfo.processInfo.environment["HERDR_DEBUG_DRAFT"], draft.isEmpty { draft = d }
+            #endif
+        }
     }
 
     private func send() {
