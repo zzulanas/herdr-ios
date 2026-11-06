@@ -152,6 +152,7 @@ final class AppStore {
         if !machines.contains(where: { $0.id == machine.id }) { machines.append(machine) }
         if activeMachineID != machine.id {
             dropConnection(phase: .idle)
+            flushAttentionSave()
             activeMachineID = machine.id
             clearLiveState()
             loadMachineState()
@@ -179,15 +180,26 @@ final class AppStore {
         if let password { KeyStore.setPassword(password, for: m.id) }
         if activeMachineID == nil { activeMachineID = m.id }
         // Changed where/how we connect: reconnect with the new settings.
-        if m.id == activeMachineID, let old, old != m, wantConnected { connect(to: m) }
+        guard m.id == activeMachineID, let old, old != m, wantConnected else { return }
+        if (old.host, old.port, old.user) != (m.host, m.port, m.user) {
+            // Possibly another box: nothing from the old session (terminals, seen
+            // state, `hello`, which keeps failed connects retrying) applies to it.
+            dropConnection(phase: .idle)
+            saveAttentionTask?.cancel(); saveAttentionTask = nil
+            defaults.removeObject(forKey: "attention." + m.id.uuidString)
+            clearLiveState()
+        }
+        connect(to: m)
     }
 
     func removeMachine(_ id: UUID) {
         guard let m = machines.first(where: { $0.id == id }) else { return }
         if id == activeMachineID {
             disconnect()
+            saveAttentionTask?.cancel(); saveAttentionTask = nil
             clearLiveState()
             activeMachineID = machines.first { $0.id != id }?.id
+            loadMachineState()
         }
         machines.removeAll { $0.id == id }
         KeyStore.setPassword(nil, for: id)
@@ -340,9 +352,11 @@ final class AppStore {
         let after = selectedTabBySpace[spaceID].flatMap { id in space.tabs.contains { $0.id == id } ? id : nil } ?? space.tabs.last?.id
         let folder = folder?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let addr = try await run(c, argv: argv, task: task, cwd: folder.isEmpty ? startFolder(for: space) : folder, space: spaceID, tab: tabID)
-        try await writeDoc { v in
-            try HerdrKit.Layout.addTab(v, space: spaceID, after: after,
-                              tab: HerdrKit.Layout.tabJSON(id: tabID, name: name ?? "", paneID: paneID, terminal: addr))
+        try await placeOrKill(addr, c) {
+            try await self.writeDoc { v in
+                try HerdrKit.Layout.addTab(v, space: spaceID, after: after,
+                                  tab: HerdrKit.Layout.tabJSON(id: tabID, name: name ?? "", paneID: paneID, terminal: addr))
+            }
         }
         selectedSpaceID = spaceID
         selectedTabBySpace[spaceID] = tabID
@@ -361,9 +375,11 @@ final class AppStore {
         let folder = folder.trimmingCharacters(in: .whitespacesAndNewlines)
         let addr = try await run(c, argv: argv, task: task, cwd: folder.isEmpty ? home : folder, space: spaceID, tab: tabID)
         let after = selectedSpaceID
-        try await writeDoc { v in
-            HerdrKit.Layout.addSpace(v, id: spaceID, name: name ?? "", folder: folder == self.home ? "" : folder,
-                            tab: HerdrKit.Layout.tabJSON(id: tabID, name: tabName ?? "", paneID: paneID, terminal: addr), after: after)
+        try await placeOrKill(addr, c) {
+            try await self.writeDoc { v in
+                HerdrKit.Layout.addSpace(v, id: spaceID, name: name ?? "", folder: folder == self.home ? "" : folder,
+                                tab: HerdrKit.Layout.tabJSON(id: tabID, name: tabName ?? "", paneID: paneID, terminal: addr), after: after)
+            }
         }
         selectedSpaceID = spaceID
         selectedTabBySpace[spaceID] = tabID
@@ -401,6 +417,9 @@ final class AppStore {
     }
 
     func send(_ address: String, text: String) async throws {
+        #if DEBUG
+        if Self.isDemo { try await demoSend(address, text: text); return }
+        #endif
         _ = try await connectedClient().call("terminal.send", ["terminal": .string(address), "text": .string(text)], timeout: 15)
     }
     func keys(_ address: String, _ keys: [String]) async throws {
@@ -706,8 +725,10 @@ final class AppStore {
             repeat {
                 guard let self, let c = self.client else { return }
                 self.docRefreshAgain = false
-                guard let d = try? await c.docGet(HerdrKit.Layout.docName), gen == self.generation else { return }
-                self.applyDoc(d)
+                let d = try? await c.docGet(HerdrKit.Layout.docName)
+                guard gen == self.generation else { return }
+                // A failed read still honours a doc event that arrived meanwhile.
+                if let d { self.applyDoc(d) }
             } while self?.docRefreshAgain == true
         }
     }
@@ -731,6 +752,20 @@ final class AppStore {
                     throw e
                 }
             }
+        }
+    }
+
+    /// Runs the layout write that puts a just-started terminal on screen. If it
+    /// fails (conflict twice, space deleted elsewhere, connection dropped), the
+    /// terminal would keep running in no tab, where nobody can see or close it:
+    /// kill it before passing the error on. Best effort: on a dead connection the
+    /// kill can't be sent, and the terminal shows up under Other terminals.
+    private func placeOrKill(_ addr: String, _ c: HerdrClient, _ place: () async throws -> Void) async throws {
+        do {
+            try await place()
+        } catch {
+            _ = try? await c.call("terminal.kill", ["terminal": .string(addr)], timeout: 15)
+            throw error
         }
     }
 
@@ -822,7 +857,7 @@ final class AppStore {
 
     private func loadMachineState() {
         guard let id = activeMachineID else { return }
-        if let h = defaults.string(forKey: "home." + id.uuidString) { home = h }
+        home = defaults.string(forKey: "home." + id.uuidString) ?? "~"
         restoringView = true
         defer { restoringView = false }
         if let d = defaults.data(forKey: "view." + id.uuidString), let v = try? JSONDecoder().decode(ViewState.self, from: d) {
@@ -848,11 +883,20 @@ final class AppStore {
 
     private func scheduleAttentionSave() {
         guard saveAttentionTask == nil else { return }
+        let machine = activeMachineID
         saveAttentionTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
-            self?.saveAttentionTask = nil
-            self?.saveAttentionNow()
+            // Cancelled, or the machine changed: this state isn't the current machine's to save.
+            guard let self, !Task.isCancelled else { return }
+            self.saveAttentionTask = nil
+            if self.activeMachineID == machine { self.saveAttentionNow() }
         }
+    }
+
+    /// Saves now and drops the pending save (before switching machines).
+    private func flushAttentionSave() {
+        saveAttentionTask?.cancel(); saveAttentionTask = nil
+        saveAttentionNow()
     }
 
     private func saveAttentionNow() {

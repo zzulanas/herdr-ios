@@ -143,6 +143,11 @@ final class TerminalController: NSObject, TerminalViewDelegate {
         self.store = store
         active = true
         if stream == nil, attachTask == nil, phase != .restarting { start() }
+        else if phase == .restarting {
+            // The restart may have finished while another screen was on top
+            // (storeChanged is ignored while inactive): check again now.
+            storeChanged(connected: store.phase == .connected, record: store.terminals[address])
+        }
         else { stream?.focus(true) }
     }
 
@@ -210,7 +215,10 @@ final class TerminalController: NSObject, TerminalViewDelegate {
             } catch {
                 guard let self, !Task.isCancelled else { return }
                 self.attachTask = nil
-                if store.phase != .connected { self.phase = .lost }
+                // The client fails pending calls before its disconnect callback
+                // updates store.phase, so trust the error's kind too.
+                let kind = (error as? HerdrError)?.kind
+                if store.phase != .connected || kind == "lost" || kind == "closed" { self.phase = .lost }
                 else if (error as? HerdrError)?.kind == "unavailable" {
                     // Lost keep:true program: the core restarts it; reattach after `restarted` (SPEC §2).
                     self.phase = .restarting

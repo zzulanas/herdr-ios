@@ -54,7 +54,9 @@ struct NewAgentSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
+                    // Once Start is pressed the box is already starting it: no take-backs.
                     Button("Cancel", systemImage: "xmark") { dismiss() }
+                        .disabled(busy)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     if busy {
@@ -68,6 +70,7 @@ struct NewAgentSheet: View {
             }
         }
         .presentationDetents([.large])
+        .interactiveDismissDisabled(busy)
         .presentationDragIndicator(.visible)
         .onAppear {
             if let s = initialSpace ?? store.selectedSpaceID, store.spaces.contains(where: { $0.id == s }) { target = .space(s) }
@@ -132,7 +135,10 @@ struct NewAgentSheet: View {
                         SpaceBadge(name: name.isEmpty ? "~" : name, colorKey: SpaceBadge.colorKey(for: s.id))
                         VStack(alignment: .leading, spacing: 1) {
                             Text(name.isEmpty ? "~" : name).font(HF.ui(15.5, .medium)).foregroundStyle(HC.fg)
-                            Text(store.tildePath(s.folder)).font(HF.ui(12.5)).foregroundStyle(HC.dim).lineLimit(1)
+                            let path = store.tildePath(s.folder)
+                            if path != (name.isEmpty ? "~" : name) {
+                                Text(path).font(HF.ui(12.5)).foregroundStyle(HC.dim).lineLimit(1)
+                            }
                         }
                         Spacer()
                         if target == .space(s.id) {
