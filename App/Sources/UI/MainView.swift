@@ -303,6 +303,7 @@ struct SpaceRowView: View {
         if !item.folder.isEmpty, item.folder != item.name { parts.append(item.folder) }
         if item.tabs > 0 { parts.append(item.tabs == 1 ? "1 tab" : "\(item.tabs) tabs") }
         if item.agents > 0 { parts.append(item.agents == 1 ? "1 agent" : "\(item.agents) agents") }
+        if item.tabs == 0 { parts.append("No tabs") }
         return parts.joined(separator: " · ")
     }
 }

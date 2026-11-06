@@ -67,7 +67,14 @@ struct SpaceView: View {
                     .id(tab.id)
                 }
             } else {
-                ContentUnavailableView("No tabs", systemImage: "rectangle.stack")
+                ContentUnavailableView {
+                    Label("No tabs", systemImage: "rectangle.stack")
+                } description: {
+                    Text("Start an agent or a shell here.")
+                } actions: {
+                    Button("New agent") { nav.newAgentSpace = space.id; nav.showNewAgent = true }
+                        .buttonStyle(.glassProminent)
+                }
             }
         }
         .toolbar {

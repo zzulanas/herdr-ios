@@ -59,6 +59,10 @@ final class ChatModel {
     private var offset: Int64 = -1
     private var loop: Task<Void, Never>?
     private var wake: CheckedContinuation<Void, Never>?
+    /// Identifies the current pause, so a stale timer can't end a later one.
+    private var wakeToken = 0
+    /// A nudge arrived while no pause was waiting (mid-load): skip the next pause.
+    private var nudged = false
     private weak var store: AppStore?
 
     init(address: String) { self.address = address }
@@ -73,6 +77,7 @@ final class ChatModel {
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.load()
+                guard !Task.isCancelled else { return }
                 await self.pause()
             }
         }
@@ -81,19 +86,26 @@ final class ChatModel {
     func stop() {
         loop?.cancel(); loop = nil
         wake?.resume(); wake = nil
+        nudged = false
     }
 
     /// Something changed (status, turn, title): read now instead of waiting.
-    func nudge() { wake?.resume(); wake = nil }
+    func nudge() {
+        if let w = wake { w.resume(); wake = nil } else if loop != nil { nudged = true }
+    }
 
     private func pause() async {
         let busy = store.map { [.working, .blocked].contains($0.attention(of: address)) } ?? false
         let delay: Duration = busy ? .milliseconds(1500) : .seconds(6)
+        if nudged { nudged = false; return }
+        wakeToken += 1
+        let token = wakeToken
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             wake = c
             Task { [weak self] in
                 try? await Task.sleep(for: delay)
-                self?.wake?.resume(); self?.wake = nil
+                guard let self, self.wakeToken == token else { return }
+                self.wake?.resume(); self.wake = nil
             }
         }
     }
@@ -113,6 +125,8 @@ final class ChatModel {
                 }
                 if !apply(r.stdout) { return }
             } catch {
+                // Leaving the chat cancels the read: not a failure to show.
+                if Task.isCancelled || error is CancellationError { return }
                 if case .ready = phase {} else { phase = .failed(error.localizedDescription) }
                 return
             }
