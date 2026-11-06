@@ -1,7 +1,7 @@
 import Foundation
 
 // The Chat model: entries from the box-side transcript script, folded into
-// turns, plus the voice-reply rules. Pure, so it is unit-tested here.
+// turns. Pure, so it is unit-tested here.
 
 /// One entry the box-side script emitted (TranscriptScript).
 public enum ChatEntry: Sendable {
@@ -100,86 +100,5 @@ public enum ChatFold {
             }
         }
         return out
-    }
-}
-
-// MARK: Voice replies
-
-/// Decides when a prompt sent by voice has been answered, and what to say.
-///
-/// A reply is spoken only for the turn our prompt started: the last turn,
-/// whose prompt is the text we sent, once it is over. Never an earlier
-/// turn's answer (the transcript can lag the send by seconds), never twice.
-public struct VoiceReplyWatch: Equatable, Sendable {
-    public enum Action: Equatable, Sendable { case none, speak(String), announceBlocked }
-
-    public let sent: String
-    public let sentAt: Date
-    /// The agent has been seen working (or our prompt has shown up) since we sent.
-    public private(set) var started = false
-    public private(set) var announcedBlocked = false
-    public private(set) var finished = false
-
-    /// How long a voice prompt waits for its answer before it's dropped.
-    public static let lifetime: TimeInterval = 30 * 60
-
-    public init(sent: String, at: Date) { self.sent = sent; self.sentAt = at }
-
-    public func expired(now: Date) -> Bool { now.timeIntervalSince(sentAt) > Self.lifetime }
-
-    public static func normalized(_ s: String) -> String {
-        s.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-    }
-
-    /// Our prompt's turn, if the transcript has it yet.
-    public func ourTurn(in turns: [ChatTurn]) -> ChatTurn? {
-        let want = Self.normalized(sent)
-        guard let i = turns.lastIndex(where: { if case .user(let s) = $0.prompt { Self.normalized(s) == want } else { false } })
-        else { return nil }
-        let t = turns[i]
-        // An identical earlier prompt ("yes") isn't ours: ours started around when we sent it.
-        if let at = t.startedAt, at < sentAt.addingTimeInterval(-120) { return nil }
-        return t
-    }
-
-    public mutating func update(attention: Attention, turns: [ChatTurn]) -> Action {
-        guard !finished else { return .none }
-        let mine = ourTurn(in: turns)
-        if attention == .working || mine != nil { started = true }
-        guard started else { return .none }
-        if attention == .blocked {
-            guard !announcedBlocked else { return .none }
-            announcedBlocked = true
-            return .announceBlocked
-        }
-        announcedBlocked = false   // a later block is news again
-        guard attention != .working, let mine, mine.id == turns.last?.id else { return .none }
-        // Over: the transcript says so, or the agent stopped working.
-        guard mine.durationMs != nil || attention == .done || attention == .idle else { return .none }
-        guard let reply = mine.lastText else { return .none }
-        finished = true
-        return .speak(Self.spoken(reply))
-    }
-
-    /// The reply's first paragraph, as plain words: no markdown, code or URLs.
-    public static func spoken(_ markdown: String) -> String {
-        let paragraphs = markdown.components(separatedBy: "\n\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        var s = paragraphs.first { !$0.isEmpty && !$0.hasPrefix("```") && !$0.hasPrefix("|") } ?? ""
-        if s.hasPrefix("#") { s = s.drop { $0 == "#" }.trimmingCharacters(in: .whitespaces) }
-        let rules: [(String, String)] = [
-            (#"\[([^\]]+)\]\([^)]+\)"#, "$1"),   // [text](url) → text
-            (#"https?://\S+"#, "a link"),
-            (#"`([^`]+)`"#, "$1"),
-            (#"(?m)^\s*(?:[-•>*]|\d+[.)])\s+"#, ""),   // list markers and quotes, before emphasis
-            (#"\*{1,3}|~~"#, ""),
-            (#"(?<![A-Za-z0-9])_{1,3}|_{1,3}(?![A-Za-z0-9])"#, ""),   // _emphasis_, not snake_case
-            (#"\s+"#, " "),
-        ]
-        for (p, r) in rules { s = s.replacingOccurrences(of: p, with: r, options: .regularExpression) }
-        // Keep it short: a runaway first paragraph stops after ~3 sentences.
-        if s.count > 320, let cut = s.range(of: #"^.{120,320}?[.!?](\s|$)"#, options: .regularExpression) {
-            s = String(s[cut])
-        }
-        return s.trimmingCharacters(in: .whitespaces)
     }
 }
