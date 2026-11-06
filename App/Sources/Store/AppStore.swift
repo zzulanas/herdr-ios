@@ -340,9 +340,11 @@ final class AppStore {
         let after = selectedTabBySpace[spaceID].flatMap { id in space.tabs.contains { $0.id == id } ? id : nil } ?? space.tabs.last?.id
         let folder = folder?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let addr = try await run(c, argv: argv, task: task, cwd: folder.isEmpty ? startFolder(for: space) : folder, space: spaceID, tab: tabID)
-        try await writeDoc { v in
-            try HerdrKit.Layout.addTab(v, space: spaceID, after: after,
-                              tab: HerdrKit.Layout.tabJSON(id: tabID, name: name ?? "", paneID: paneID, terminal: addr))
+        try await placeOrKill(addr, c) {
+            try await self.writeDoc { v in
+                try HerdrKit.Layout.addTab(v, space: spaceID, after: after,
+                                  tab: HerdrKit.Layout.tabJSON(id: tabID, name: name ?? "", paneID: paneID, terminal: addr))
+            }
         }
         selectedSpaceID = spaceID
         selectedTabBySpace[spaceID] = tabID
@@ -361,9 +363,11 @@ final class AppStore {
         let folder = folder.trimmingCharacters(in: .whitespacesAndNewlines)
         let addr = try await run(c, argv: argv, task: task, cwd: folder.isEmpty ? home : folder, space: spaceID, tab: tabID)
         let after = selectedSpaceID
-        try await writeDoc { v in
-            HerdrKit.Layout.addSpace(v, id: spaceID, name: name ?? "", folder: folder == self.home ? "" : folder,
-                            tab: HerdrKit.Layout.tabJSON(id: tabID, name: tabName ?? "", paneID: paneID, terminal: addr), after: after)
+        try await placeOrKill(addr, c) {
+            try await self.writeDoc { v in
+                HerdrKit.Layout.addSpace(v, id: spaceID, name: name ?? "", folder: folder == self.home ? "" : folder,
+                                tab: HerdrKit.Layout.tabJSON(id: tabID, name: tabName ?? "", paneID: paneID, terminal: addr), after: after)
+            }
         }
         selectedSpaceID = spaceID
         selectedTabBySpace[spaceID] = tabID
@@ -731,6 +735,20 @@ final class AppStore {
                     throw e
                 }
             }
+        }
+    }
+
+    /// Runs the layout write that puts a just-started terminal on screen. If it
+    /// fails (conflict twice, space deleted elsewhere, connection dropped), the
+    /// terminal would keep running in no tab, where nobody can see or close it:
+    /// kill it before passing the error on. Best effort: on a dead connection the
+    /// kill can't be sent, and the terminal shows up under Other terminals.
+    private func placeOrKill(_ addr: String, _ c: HerdrClient, _ place: () async throws -> Void) async throws {
+        do {
+            try await place()
+        } catch {
+            _ = try? await c.call("terminal.kill", ["terminal": .string(addr)], timeout: 15)
+            throw error
         }
     }
 
