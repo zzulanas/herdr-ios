@@ -16,6 +16,8 @@ final class ChatModel {
     /// The transcript continues above what was loaded (we only read its tail).
     private(set) var hasEarlier = false
     private(set) var revision = 0
+    /// The last read failed after turns were shown: they may be out of date.
+    private(set) var stale = false
 
     private var entries: [ChatEntry] = []
     private var session = ""
@@ -86,14 +88,15 @@ final class ChatModel {
                                              cwd: nil, on: nil, timeout: 20, input: nil)
                 guard r.code == 0 else {
                     let err = String(decoding: r.stderr, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-                    phase = .failed(err.isEmpty ? "Couldn't read the conversation." : String(err.suffix(300)))
+                    let why = err.isEmpty ? "Couldn't read the conversation." : String(err.suffix(300))
+                    if turns.isEmpty { phase = .failed(why) } else { stale = true }
                     return
                 }
                 if !apply(r.stdout) { return }
             } catch {
                 // Leaving the chat cancels the read: not a failure to show.
                 if Task.isCancelled || error is CancellationError { return }
-                if case .ready = phase {} else { phase = .failed(error.localizedDescription) }
+                if turns.isEmpty { phase = .failed(error.localizedDescription) } else { stale = true }
                 return
             }
         }
@@ -123,6 +126,7 @@ final class ChatModel {
         }
         if fresh || added { rebuild() }
         phase = .ready
+        stale = false
         return head["more"].bool ?? false
     }
 

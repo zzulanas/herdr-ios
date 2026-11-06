@@ -12,6 +12,7 @@ struct ChatView: View {
     @State private var shownTurns = ChatView.turnPage
     @State private var position = ScrollPosition(edge: .bottom)
     @State private var pinned = true
+    @State private var landed = false
 
     /// What changes the bottom of the chat.
     private struct BottomKey: Equatable { var revision: Int; var working: Bool; var blocked: Bool }
@@ -43,6 +44,12 @@ struct ChatView: View {
         .onScrollGeometryChange(for: Bool.self) { g in
             g.visibleRect.maxY >= g.contentSize.height - 80
         } action: { _, atBottom in
+            // Until the chat first lands on its latest turn, keep sending it there: the
+            // transcript arrives after the first layout (mid-push from Home), when an
+            // earlier scrollTo has nothing to scroll and the eager stack sits at the top.
+            if !landed, !model.turns.isEmpty {
+                if atBottom { landed = true } else { position.scrollTo(edge: .bottom); return }
+            }
             pinned = atBottom
         }
         .onChange(of: BottomKey(revision: model.revision, working: att == .working, blocked: att == .blocked)) { _, _ in
@@ -95,6 +102,10 @@ struct ChatView: View {
                 TurnView(turn: turn, isLast: turn.id == model.turns.last?.id, working: working)
             }
             if working { WorkingRow(since: model.turns.last?.startedAt) }
+            if model.stale {
+                Label("Couldn't refresh. This may be out of date; retrying.", systemImage: "exclamationmark.arrow.triangle.2.circlepath")
+                    .font(HF.ui(12.5)).foregroundStyle(HC.dim).frame(maxWidth: .infinity)
+            }
         }
     }
 

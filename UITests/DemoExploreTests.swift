@@ -34,6 +34,9 @@ final class DemoExploreTests: XCTestCase {
         back()
         app.buttons.matching(NSPredicate(format: "label CONTAINS 'Global time slider'")).firstMatch.tap(); sleep(3)
         shot("03-agent-chat")
+        // Pushed from Home, the chat opens on the latest turn, not the top of the history.
+        let latest = app.staticTexts["Yes, put it in the URL"]
+        XCTAssertTrue(latest.exists && app.frame.contains(latest.frame), "chat didn't open at the latest turn")
         back()
         app.swipeUp(); sleep(1)
         shot("04-home-scrolled")
